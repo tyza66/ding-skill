@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ding"
+  short_description: "One ding to confirm, three dings when complete."
+  default_prompt: "Use $ding to signal before decisions and when the task is complete."
