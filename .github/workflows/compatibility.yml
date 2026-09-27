@@ -1,0 +1,64 @@
+name: Compatibility
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  launchers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Python launcher
+        shell: bash
+        run: |
+          python ding/scripts/ding.py "confirm" --dry-run
+          python ding/scripts/ding.py "done" --dry-run
+          python ding/scripts/ding.py "done" --sound ding/assets/ding.wav --dry-run
+          python -c 'import json, subprocess; data=json.loads(subprocess.check_output(["python", "ding/scripts/ding.py", "done", "--dry-run"], text=True)); assert data["count"] == 3'
+
+      - name: Validate POSIX launcher
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh -n ding/scripts/ding
+          sh ding/scripts/ding "confirm" --dry-run
+          sh ding/scripts/ding "done" --dry-run
+          sh ding/scripts/ding "done" --sound ding/assets/ding.wav --dry-run
+          sh ding/scripts/ding 2 --dry-run
+
+      - name: Validate PowerShell launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\ding\scripts\ding.ps1 -Signal confirm -DryRun
+          & .\ding\scripts\ding.ps1 -Signal done -DryRun
+          & .\ding\scripts\ding.ps1 -Signal done -Sound .\ding\assets\ding.wav -DryRun
+          $result = & .\ding\scripts\ding.ps1 -Signal done -DryRun | ConvertFrom-Json
+          if ($result.count -ne 3) { throw "expected count 3" }
+
+      - name: Validate CMD launcher
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          ding\scripts\ding.cmd confirm -DryRun
+          ding\scripts\ding.cmd done -DryRun
+
+      - name: Validate bundled assets
+        shell: bash
+        run: |
+          test -s ding/assets/ding.mp3
+          test -s ding/assets/ding.wav

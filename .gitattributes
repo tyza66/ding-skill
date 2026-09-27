@@ -1,0 +1,13 @@
+* text=auto
+
+ding/scripts/ding text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.mp3 binary
+*.wav binary

@@ -1,0 +1,253 @@
+#!/usr/bin/env sh
+set -u
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+asset_dir=$script_dir/../assets
+default_mp3=$asset_dir/ding.mp3
+default_wav=$asset_dir/ding.wav
+
+signal=confirm
+count=
+custom_sound=
+dry_run=0
+
+usage() {
+    cat <<'EOF'
+Usage: ding [confirm|done|COUNT] [--count COUNT] [--sound PATH] [--dry-run]
+
+  confirm, once, 1    Play one ding
+  done, complete, 3  Play three dings
+  COUNT              Play a custom positive number of dings
+EOF
+}
+
+die() {
+    printf 'ding: %s\n' "$1" >&2
+    exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --count)
+            shift
+            [ "$#" -gt 0 ] || die "--count requires a value"
+            count=$1
+            ;;
+        --count=*)
+            count=${1#*=}
+            ;;
+        --sound)
+            shift
+            [ "$#" -gt 0 ] || die "--sound requires a path"
+            custom_sound=$1
+            ;;
+        --sound=*)
+            custom_sound=${1#*=}
+            ;;
+        --dry-run)
+            dry_run=1
+            ;;
+        --)
+            shift
+            if [ "$#" -gt 0 ]; then
+                signal=$1
+            fi
+            break
+            ;;
+        -*)
+            die "unknown option: $1"
+            ;;
+        *)
+            signal=$1
+            ;;
+    esac
+    shift
+done
+
+if [ -n "$custom_sound" ]; then
+    sound=$custom_sound
+elif [ -n "${DING_SOUND:-}" ]; then
+    sound=$DING_SOUND
+else
+    sound=$default_mp3
+fi
+
+[ -f "$sound" ] || die "sound file not found: $sound"
+
+if [ -z "$count" ]; then
+    case $signal in
+        confirm|once|1) count=1 ;;
+        done|complete|3) count=3 ;;
+        *)
+            case $signal in
+                ''|*[!0-9]*) die "unknown signal: $signal" ;;
+                *) count=$signal ;;
+            esac
+            ;;
+    esac
+fi
+
+case $count in
+    ''|*[!0-9]*) die "count must be a positive integer" ;;
+esac
+[ "$count" -ge 1 ] || die "count must be at least 1"
+
+platform=$(uname -s 2>/dev/null || printf unknown)
+windows_host=0
+case $platform in
+    *Microsoft*|*MINGW*|*MSYS*|*CYGWIN*) windows_host=1 ;;
+esac
+if [ -n "${WSL_DISTRO_NAME:-}" ]; then
+    windows_host=1
+fi
+
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+to_windows_path() {
+    if has_command wslpath; then
+        wslpath -w "$1"
+    elif has_command cygpath; then
+        cygpath -w "$1"
+    else
+        return 1
+    fi
+}
+
+play_via_windows_host() {
+    [ "$windows_host" -eq 1 ] || return 1
+    has_command powershell.exe || return 1
+
+    windows_sound=$(to_windows_path "$sound") || return 1
+    windows_script=$(to_windows_path "$script_dir/ding.ps1") || return 1
+
+    powershell.exe \
+        -NoProfile \
+        -NonInteractive \
+        -ExecutionPolicy Bypass \
+        -File "$windows_script" \
+        -Signal once \
+        -Count 1 \
+        -Sound "$windows_sound" >/dev/null 2>&1
+}
+
+play_once() {
+    if [ "$platform" = Darwin ] && has_command afplay; then
+        afplay "$sound" >/dev/null 2>&1 && return 0
+    fi
+
+    if has_command pw-play; then
+        pw-play "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command paplay; then
+        paplay "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command ffplay; then
+        ffplay -nodisp -autoexit -loglevel quiet "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command mpg123; then
+        mpg123 -q "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command mpg321; then
+        mpg321 -q "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command mpv; then
+        mpv --no-video --really-quiet "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command mplayer; then
+        mplayer -really-quiet -nolirc -vo null "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command cvlc; then
+        cvlc --play-and-exit --intf dummy "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command vlc; then
+        vlc --play-and-exit --intf dummy "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command gst-play-1.0; then
+        gst-play-1.0 --quiet "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if has_command play; then
+        play -q "$sound" >/dev/null 2>&1 && return 0
+    fi
+    if [ -f "$default_wav" ] && has_command aplay; then
+        if [ "$sound" = "$default_mp3" ]; then
+            aplay -q "$default_wav" >/dev/null 2>&1 && return 0
+        else
+            case $sound in
+                *.wav|*.WAV) aplay -q "$sound" >/dev/null 2>&1 && return 0 ;;
+            esac
+        fi
+    fi
+
+    play_via_windows_host
+}
+
+bell() {
+    if [ -w /dev/tty ]; then
+        printf '\a' >/dev/tty 2>/dev/null || printf '\a'
+    else
+        printf '\a'
+    fi
+}
+
+if [ "$dry_run" -eq 1 ]; then
+    backend=terminal-bell
+    if [ "$platform" = Darwin ] && has_command afplay; then
+        backend=afplay
+    elif has_command pw-play; then
+        backend=pw-play
+    elif has_command paplay; then
+        backend=paplay
+    elif has_command ffplay; then
+        backend=ffplay
+    elif has_command mpg123; then
+        backend=mpg123
+    elif has_command mpg321; then
+        backend=mpg321
+    elif has_command mpv; then
+        backend=mpv
+    elif has_command mplayer; then
+        backend=mplayer
+    elif has_command cvlc; then
+        backend=cvlc
+    elif has_command vlc; then
+        backend=vlc
+    elif has_command gst-play-1.0; then
+        backend=gst-play-1.0
+    elif has_command play; then
+        backend=play
+    elif [ -f "$default_wav" ] && has_command aplay; then
+        if [ "$sound" = "$default_mp3" ]; then
+            backend=aplay
+        else
+            case $sound in
+                *.wav|*.WAV) backend=aplay ;;
+            esac
+        fi
+    elif [ "$windows_host" -eq 1 ] && has_command powershell.exe; then
+        backend=windows-host
+    fi
+
+    escaped_sound=$(printf '%s' "$sound" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '{"backend":"%s","count":%s,"platform":"%s","signal":"%s","sound":"%s"}\n' \
+        "$backend" "$count" "$platform" "$signal" "$escaped_sound"
+    exit 0
+fi
+
+i=0
+while [ "$i" -lt "$count" ]; do
+    if ! play_once; then
+        bell
+    fi
+    i=$((i + 1))
+    if [ "$i" -lt "$count" ]; then
+        sleep 0.12 2>/dev/null || sleep 1
+    fi
+done
+
+exit 0
