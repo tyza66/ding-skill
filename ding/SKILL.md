@@ -14,6 +14,12 @@ Use the bundled microwave-style sound as a short audible status signal. Do not a
 - Do not use `done` for progress updates, partial results, tool-level errors, interruptions, or a task that is blocked while waiting for the user. Use `confirm` for a blocked decision.
 - If the user asks to mute notifications or continue in silence, do not play either signal.
 
+## Codex hooks
+
+The optional Codex hook integration maps `PermissionRequest` and the `request_user_input` tool to `confirm`, and a completed `Stop` event to `done`. When that integration is installed, keep using the manual rules above in other AI tools and for user-facing questions that do not use `request_user_input`.
+
+The launchers suppress a duplicate signal when the same event was already played within a few seconds. This lets a manual call and the Codex hook coexist without intentionally playing the same decision or completion cue twice. Hook playback still requires the hook to be trusted in Codex.
+
 ## Run
 
 Resolve the `scripts` directory relative to the directory containing this `SKILL.md`, then replace `DING_SKILL_DIR` in the examples with that directory. Use the first launcher that works:
@@ -47,3 +53,5 @@ python3 "$DING_SKILL_DIR/scripts/ding.py" done
 ```
 
 All launchers try multiple system audio backends and fall back to the terminal bell when desktop audio is unavailable. A custom audio file can be supplied with `--sound <path>` or `DING_SOUND=<path>`.
+
+For Codex hook installation and trust details, read the repository `README.md`.

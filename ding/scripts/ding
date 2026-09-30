@@ -10,10 +10,13 @@ signal=confirm
 count=
 custom_sound=
 dry_run=0
+dedupe_window=
+dedupe_against=
 
 usage() {
     cat <<'EOF'
 Usage: ding [confirm|done|COUNT] [--count COUNT] [--sound PATH] [--dry-run]
+           [--dedupe-window SECONDS] [--dedupe-against SIGNAL]
 
   confirm, once, 1    Play one ding
   done, complete, 3  Play three dings
@@ -50,6 +53,22 @@ while [ "$#" -gt 0 ]; do
             ;;
         --dry-run)
             dry_run=1
+            ;;
+        --dedupe-window)
+            shift
+            [ "$#" -gt 0 ] || die "--dedupe-window requires a value"
+            dedupe_window=$1
+            ;;
+        --dedupe-window=*)
+            dedupe_window=${1#*=}
+            ;;
+        --dedupe-against)
+            shift
+            [ "$#" -gt 0 ] || die "--dedupe-against requires a value"
+            dedupe_against="$dedupe_against $1"
+            ;;
+        --dedupe-against=*)
+            dedupe_against="$dedupe_against ${1#*=}"
             ;;
         --)
             shift
@@ -95,6 +114,47 @@ case $count in
     ''|*[!0-9]*) die "count must be a positive integer" ;;
 esac
 [ "$count" -ge 1 ] || die "count must be at least 1"
+
+case $count in
+    1) state_key=confirm ;;
+    3) state_key="done" ;;
+    *) state_key=count-$count ;;
+esac
+
+if [ -z "$dedupe_window" ]; then
+    if [ "$state_key" = "done" ]; then
+        dedupe_window=${DING_DEDUPE_WINDOW:-6}
+    else
+        dedupe_window=${DING_DEDUPE_WINDOW:-4}
+    fi
+fi
+case $dedupe_window in
+    ''|*[!0-9]*) die "dedupe window must be a non-negative integer" ;;
+esac
+
+if [ -n "${DING_STATE_DIR:-}" ]; then
+    state_dir=$DING_STATE_DIR
+else
+    state_dir=${TMPDIR:-/tmp}/ding-skill-$(id -u 2>/dev/null || printf user)
+fi
+
+recent_state() {
+    key=$1
+    marker=$state_dir/$key.stamp
+    [ -f "$marker" ] || return 1
+    previous=$(sed -n '1p' "$marker" 2>/dev/null || printf 0)
+    case $previous in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    now=$(date +%s 2>/dev/null || printf 0)
+    [ "$now" -ge "$previous" ] || return 1
+    [ $((now - previous)) -lt "$dedupe_window" ]
+}
+
+mark_state() {
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+    date +%s >"$state_dir/$1.stamp" 2>/dev/null || true
+}
 
 platform=$(uname -s 2>/dev/null || printf unknown)
 windows_host=0
@@ -238,6 +298,16 @@ if [ "$dry_run" -eq 1 ]; then
         "$backend" "$count" "$platform" "$signal" "$escaped_sound"
     exit 0
 fi
+
+if recent_state "$state_key"; then
+    exit 0
+fi
+for other in $dedupe_against; do
+    if recent_state "$other"; then
+        exit 0
+    fi
+done
+mark_state "$state_key"
 
 i=0
 while [ "$i" -lt "$count" ]; do

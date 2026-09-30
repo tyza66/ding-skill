@@ -7,6 +7,10 @@ param(
 
     [string]$Sound = "",
 
+    [Nullable[double]]$DedupeWindow = $null,
+
+    [string[]]$DedupeAgainst = @(),
+
     [switch]$DryRun
 )
 
@@ -53,6 +57,85 @@ if ($Count -lt 1) {
             exit 2
         }
         $Count = $Parsed
+    }
+}
+
+$StateKey = if ($Count -eq 1) {
+    "confirm"
+}
+elseif ($Count -eq 3) {
+    "done"
+}
+else {
+    "count-$Count"
+}
+
+if ($null -eq $DedupeWindow) {
+    $ConfiguredWindow = $env:DING_DEDUPE_WINDOW
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredWindow)) {
+        $ParsedWindow = 0.0
+        if ([double]::TryParse($ConfiguredWindow, [ref]$ParsedWindow)) {
+            $DedupeWindow = $ParsedWindow
+        }
+        else {
+            Write-Error "invalid DING_DEDUPE_WINDOW: $ConfiguredWindow"
+            exit 2
+        }
+    }
+    else {
+        $DedupeWindow = if ($StateKey -eq "done") { 6.0 } else { 4.0 }
+    }
+}
+
+$DedupeWindowSeconds = [double]$DedupeWindow
+if (
+    $DedupeWindowSeconds -lt 0 -or
+    [double]::IsNaN($DedupeWindowSeconds) -or
+    [double]::IsInfinity($DedupeWindowSeconds)
+) {
+    Write-Error "dedupe window must be a finite non-negative number"
+    exit 2
+}
+
+$StateDir = if (-not [string]::IsNullOrWhiteSpace($env:DING_STATE_DIR)) {
+    $env:DING_STATE_DIR
+}
+else {
+    Join-Path ([System.IO.Path]::GetTempPath()) "ding-skill-$($env:USERNAME)"
+}
+
+function Get-StatePath {
+    param([string]$Key)
+    return Join-Path $StateDir "$Key.stamp"
+}
+
+function Test-RecentState {
+    param(
+        [string]$Key,
+        [double]$Window
+    )
+
+    if ($Window -le 0) {
+        return $false
+    }
+
+    try {
+        $Marker = Get-Item -LiteralPath (Get-StatePath $Key) -ErrorAction Stop
+        return ([DateTime]::UtcNow - $Marker.LastWriteTimeUtc).TotalSeconds -lt $Window
+    }
+    catch {
+        return $false
+    }
+}
+
+function Set-StateMarker {
+    param([string]$Key)
+
+    try {
+        New-Item -ItemType Directory -Force $StateDir | Out-Null
+        [System.IO.File]::WriteAllText((Get-StatePath $Key), [DateTime]::UtcNow.Ticks.ToString())
+    }
+    catch {
     }
 }
 
@@ -165,6 +248,16 @@ if ($DryRun) {
 
     exit 0
 }
+
+if (Test-RecentState $StateKey $DedupeWindowSeconds) {
+    exit 0
+}
+foreach ($Other in $DedupeAgainst) {
+    if (Test-RecentState $Other $DedupeWindowSeconds) {
+        exit 0
+    }
+}
+Set-StateMarker $StateKey
 
 for ($Index = 0; $Index -lt $Count; $Index++) {
     if (-not (Invoke-PlayOnce)) {

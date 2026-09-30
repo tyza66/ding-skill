@@ -30,6 +30,192 @@ jobs:
           python ding/scripts/ding.py "done" --sound ding/assets/ding.wav --dry-run
           python -c 'import json, subprocess; data=json.loads(subprocess.check_output(["python", "ding/scripts/ding.py", "done", "--dry-run"], text=True)); assert data["count"] == 3'
 
+      - name: Validate Codex hook adapter and dedupe state
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+
+          root = Path.cwd()
+          hook = root / "ding" / "scripts" / "codex-hook.py"
+          env = os.environ.copy()
+          env["DING_HOOK_DRY_RUN"] = "1"
+
+          cases = [
+              (
+                  {
+                      "hook_event_name": "PermissionRequest",
+                      "session_id": "s",
+                      "turn_id": "t",
+                      "cwd": "/tmp",
+                      "model": "m",
+                      "permission_mode": "default",
+                      "tool_input": {},
+                      "tool_name": "Bash",
+                      "transcript_path": None,
+                  },
+                  "confirm",
+              ),
+              (
+                  {
+                      "hook_event_name": "PreToolUse",
+                      "session_id": "s",
+                      "turn_id": "t",
+                      "cwd": "/tmp",
+                      "model": "m",
+                      "permission_mode": "default",
+                      "tool_input": {},
+                      "tool_name": "request_user_input",
+                      "tool_use_id": "u",
+                      "transcript_path": None,
+                  },
+                  "confirm",
+              ),
+              (
+                  {
+                      "hook_event_name": "Stop",
+                      "session_id": "s",
+                      "turn_id": "t",
+                      "cwd": "/tmp",
+                      "model": "m",
+                      "permission_mode": "default",
+                      "stop_hook_active": False,
+                      "last_assistant_message": "done",
+                      "transcript_path": None,
+                  },
+                  "done",
+              ),
+          ]
+          for payload, expected in cases:
+              result = subprocess.run(
+                  [sys.executable, str(hook)],
+                  input=json.dumps(payload),
+                  text=True,
+                  capture_output=True,
+                  env=env,
+                  check=True,
+              )
+              assert json.loads(result.stdout)["signal"] == expected
+
+          ignored = subprocess.run(
+              [sys.executable, str(hook)],
+              input='{"hook_event_name":"PreToolUse","tool_name":"Bash"}',
+              text=True,
+              capture_output=True,
+              env=env,
+              check=True,
+          )
+          assert json.loads(ignored.stdout)["signal"] is None
+
+          continuing = subprocess.run(
+              [sys.executable, str(hook)],
+              input='{"hook_event_name":"Stop","stop_hook_active":true}',
+              text=True,
+              capture_output=True,
+              env=env,
+              check=True,
+          )
+          assert json.loads(continuing.stdout)["signal"] is None
+
+          malformed = subprocess.run(
+              [sys.executable, str(hook)],
+              input="not-json",
+              text=True,
+              capture_output=True,
+              env=env,
+              check=True,
+          )
+          assert malformed.stdout == ""
+
+          disabled_env = env.copy()
+          disabled_env["DING_HOOK_DISABLE"] = "1"
+          disabled = subprocess.run(
+              [sys.executable, str(hook)],
+              input='{"hook_event_name":"PermissionRequest"}',
+              text=True,
+              capture_output=True,
+              env=disabled_env,
+              check=True,
+          )
+          assert disabled.stdout == ""
+
+          with tempfile.TemporaryDirectory() as state_dir:
+              env["DING_STATE_DIR"] = state_dir
+              spec = importlib.util.spec_from_file_location(
+                  "ding_launcher",
+                  root / "ding" / "scripts" / "ding.py",
+              )
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              module.mark_state("confirm")
+              assert module.recent_state("confirm", 4)
+              assert not module.recent_state("done", 4)
+          PY
+
+      - name: Validate Codex hook installer
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+
+          root = Path.cwd()
+          installer = root / "ding" / "scripts" / "install-codex-hook.py"
+
+          with tempfile.TemporaryDirectory() as home:
+              def run(*args):
+                  return subprocess.run(
+                      [sys.executable, str(installer), *args, "--home", home],
+                      text=True,
+                      capture_output=True,
+                      check=True,
+                  )
+
+              dry_run = json.loads(run("install", "--dry-run").stdout)
+              assert dry_run["changed"] is True
+              assert set(dry_run["hooks"]) == {"PermissionRequest", "PreToolUse", "Stop"}
+
+              run("install")
+              hooks_path = Path(home) / "hooks.json"
+              document = json.loads(hooks_path.read_text(encoding="utf-8"))
+              assert all(len(document["hooks"][event]) == 1 for event in dry_run["hooks"])
+              assert document["hooks"]["PreToolUse"][0]["matcher"] == "^request_user_input$"
+
+              document["hooks"]["Stop"].append(
+                  {"hooks": [{"type": "command", "command": "echo user-hook"}]}
+              )
+              hooks_path.write_text(json.dumps(document), encoding="utf-8")
+              run("install")
+              document = json.loads(hooks_path.read_text(encoding="utf-8"))
+              commands = [
+                  handler.get("command", "")
+                  for group in document["hooks"]["Stop"]
+                  for handler in group.get("hooks", [])
+              ]
+              assert sum("codex-hook.py" in command for command in commands) == 1
+              assert any("echo user-hook" in command for command in commands)
+
+              run("uninstall")
+              document = json.loads(hooks_path.read_text(encoding="utf-8"))
+              commands = [
+                  handler.get("command", "")
+                  for groups in document["hooks"].values()
+                  for group in groups
+                  for handler in group.get("hooks", [])
+              ]
+              assert not any("codex-hook.py" in command for command in commands)
+              assert any("echo user-hook" in command for command in commands)
+          PY
+
       - name: Validate POSIX launcher
         if: runner.os != 'Windows'
         shell: bash
@@ -39,6 +225,47 @@ jobs:
           sh ding/scripts/ding "done" --dry-run
           sh ding/scripts/ding "done" --sound ding/assets/ding.wav --dry-run
           sh ding/scripts/ding 2 --dry-run
+          sh ding/scripts/ding "done" --dedupe-window 0 --dry-run
+          python - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import tempfile
+
+          root = Path.cwd()
+          spec = importlib.util.spec_from_file_location(
+              "ding_launcher",
+              root / "ding" / "scripts" / "ding.py",
+          )
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          with tempfile.TemporaryDirectory() as tmp:
+              temp = Path(tmp)
+              fakebin = temp / "bin"
+              fakebin.mkdir()
+              calls = temp / "player.calls"
+              for name in ("afplay", "ffplay"):
+                  player = fakebin / name
+                  player.write_text(f"#!/bin/sh\nprintf x >> {calls}\n", encoding="utf-8")
+                  player.chmod(player.stat().st_mode | stat.S_IXUSR)
+
+              env = os.environ.copy()
+              env["DING_STATE_DIR"] = str(temp / "state")
+              env["PATH"] = f"{fakebin}{os.pathsep}{env['PATH']}"
+              os.environ["DING_STATE_DIR"] = env["DING_STATE_DIR"]
+              for signal in ("confirm", "done"):
+                  module.mark_state(signal)
+                  subprocess.run(
+                      ["sh", "ding/scripts/ding", signal],
+                      cwd=root,
+                      env=env,
+                      check=True,
+                  )
+              assert not calls.exists(), "POSIX launcher did not read Python markers"
+          PY
 
       - name: Validate PowerShell launcher
         if: runner.os == 'Windows'
@@ -47,6 +274,7 @@ jobs:
           & .\ding\scripts\ding.ps1 -Signal confirm -DryRun
           & .\ding\scripts\ding.ps1 -Signal done -DryRun
           & .\ding\scripts\ding.ps1 -Signal done -Sound .\ding\assets\ding.wav -DryRun
+          & .\ding\scripts\ding.ps1 -Signal done -DedupeWindow 0 -DryRun
           $result = & .\ding\scripts\ding.ps1 -Signal done -DryRun | ConvertFrom-Json
           if ($result.count -ne 3) { throw "expected count 3" }
 

@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import math
 import os
 from pathlib import Path
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import quote
 
@@ -23,6 +26,49 @@ COUNT_ALIASES = {
     "complete": 3,
     "3": 3,
 }
+
+
+def state_key(signal: str, count: int) -> str:
+    if count == 1:
+        return "confirm"
+    if count == 3:
+        return "done"
+    return f"count-{count}"
+
+
+def state_dir() -> Path:
+    configured = os.environ.get("DING_STATE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+
+    if hasattr(os, "getuid"):
+        identity = str(os.getuid())
+    else:
+        identity = "".join(
+            character if character.isalnum() or character in "._-" else "_"
+            for character in getpass.getuser()
+        )
+    return Path(tempfile.gettempdir()) / f"ding-skill-{identity}"
+
+
+def recent_state(key: str, window: float) -> bool:
+    if window <= 0:
+        return False
+
+    marker = state_dir() / f"{key}.stamp"
+    try:
+        return time.time() - marker.stat().st_mtime < window
+    except OSError:
+        return False
+
+
+def mark_state(key: str) -> None:
+    try:
+        directory = state_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{key}.stamp").write_text(str(int(time.time())), encoding="ascii")
+    except OSError:
+        pass
 
 
 def fail(message: str) -> None:
@@ -55,7 +101,36 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the selected players and sound without playing.",
     )
+    parser.add_argument(
+        "--dedupe-window",
+        type=float,
+        default=None,
+        help="Suppress the same signal when it was played within this many seconds.",
+    )
+    parser.add_argument(
+        "--dedupe-against",
+        action="append",
+        default=[],
+        help="Suppress when another signal was played within the dedupe window.",
+    )
     return parser.parse_args()
+
+
+def resolve_dedupe_window(args: argparse.Namespace, count: int) -> float:
+    window = args.dedupe_window
+    if window is None:
+        configured = os.environ.get("DING_DEDUPE_WINDOW")
+        if configured is not None and configured.strip():
+            try:
+                window = float(configured)
+            except ValueError:
+                fail(f"invalid DING_DEDUPE_WINDOW: {configured!r}")
+        else:
+            window = 6.0 if count == 3 else 4.0
+
+    if not math.isfinite(window) or window < 0:
+        fail("dedupe window must be a finite non-negative number")
+    return window
 
 
 def resolve_count(args: argparse.Namespace) -> int:
@@ -275,6 +350,7 @@ def play_wav_with_winsound(wav: Path, count: int) -> bool:
 def main() -> int:
     args = parse_args()
     count = resolve_count(args)
+    dedupe_window = resolve_dedupe_window(args, count)
     sound = resolve_sound(args.sound)
     players = available_players(sound)
     wav = resolved_wav(sound)
@@ -294,6 +370,14 @@ def main() -> int:
             )
         )
         return 0
+
+    key = state_key(args.signal, count)
+    if (
+        recent_state(key, dedupe_window)
+        or any(recent_state(other, dedupe_window) for other in args.dedupe_against)
+    ):
+        return 0
+    mark_state(key)
 
     for index in range(count):
         if index:
